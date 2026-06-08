@@ -1,10 +1,12 @@
 from app.services.security_service import SecurityService
+from copy import deepcopy
 
 class SQLGenerator:
     def __init__(self, query_structure):
-        self.query_structure = query_structure
+        self.query_structure = deepcopy(query_structure)
         self.params = {}
         self.param_counter = 0
+        self._tables_by_id = {t['id']: t for t in self.query_structure.get('tables', [])}
     
     def _next_param(self, value):
         self.param_counter += 1
@@ -13,15 +15,15 @@ class SQLGenerator:
         return f':{param_name}'
     
     def _get_table_alias(self, table_id):
-        for table in self.query_structure['tables']:
-            if table['id'] == table_id:
-                return table['alias']
+        table = self._tables_by_id.get(table_id)
+        if table:
+            return table['alias']
         raise ValueError(f'Table not found: {table_id}')
     
     def _get_table_name(self, table_id):
-        for table in self.query_structure['tables']:
-            if table['id'] == table_id:
-                return table['tableName']
+        table = self._tables_by_id.get(table_id)
+        if table:
+            return table['tableName']
         raise ValueError(f'Table not found: {table_id}')
     
     def _get_qualified_column(self, table_id, column_name):
@@ -29,18 +31,24 @@ class SQLGenerator:
         col = SecurityService.validate_column_name(column_name)
         return f'{SecurityService.quote_identifier(alias)}.{SecurityService.quote_identifier(col)}'
     
+    def _has_full_join(self):
+        joins = self.query_structure.get('joins', [])
+        return any(j.get('type') == 'FULL' for j in joins)
+    
     def generate(self):
+        if self._has_full_join():
+            return self._generate_full_join_union()
+        else:
+            return self._generate_normal()
+    
+    def _generate_normal(self):
         sql_parts = []
         
         select_clause = self._generate_select()
         sql_parts.append(select_clause)
         
-        from_clause = self._generate_from()
-        sql_parts.append(from_clause)
-        
-        join_clause = self._generate_joins()
-        if join_clause:
-            sql_parts.append(join_clause)
+        from_and_join_clause = self._generate_from_and_joins()
+        sql_parts.append(from_and_join_clause)
         
         where_clause = self._generate_where()
         if where_clause:
@@ -58,6 +66,70 @@ class SQLGenerator:
         sql_parts.append(f'LIMIT {SecurityService.validate_limit(limit)}')
         
         return '\n'.join(sql_parts)
+    
+    def _generate_full_join_union(self):
+        joins = self.query_structure.get('joins', [])
+        full_joins = [j for j in joins if j.get('type') == 'FULL']
+        
+        if len(full_joins) > 1:
+            raise ValueError('Multiple FULL JOINs are not supported')
+        
+        full_join = full_joins[0]
+        
+        left_query = deepcopy(self.query_structure)
+        left_query['joins'] = [
+            {**j, 'type': 'LEFT'} if j['id'] == full_join['id'] else j
+            for j in left_query['joins']
+        ]
+        
+        right_query = self._create_swapped_query(full_join)
+        
+        left_gen = SQLGenerator(left_query)
+        left_sql = left_gen._generate_normal()
+        left_params = left_gen.get_params()
+        
+        right_gen = SQLGenerator(right_query)
+        right_sql = right_gen._generate_normal()
+        right_params = right_gen.get_params()
+        
+        param_offset = len(left_params)
+        for key, value in right_params.items():
+            new_key = f'p{int(key[1:]) + param_offset}'
+            right_sql = right_sql.replace(f':{key}', f':{new_key}')
+            self.params[new_key] = value
+        
+        for key, value in left_params.items():
+            self.params[key] = value
+        
+        left_sql_no_limit = left_sql.rsplit('\nLIMIT', 1)[0]
+        right_sql_no_limit = right_sql.rsplit('\nLIMIT', 1)[0]
+        
+        limit = self.query_structure.get('limit', 100)
+        
+        return f'{left_sql_no_limit}\nUNION\n{right_sql_no_limit}\nLIMIT {SecurityService.validate_limit(limit)}'
+    
+    def _create_swapped_query(self, full_join):
+        swapped = deepcopy(self.query_structure)
+        
+        left_id = full_join['leftTableId']
+        right_id = full_join['rightTableId']
+        
+        tables = swapped['tables']
+        left_idx = next(i for i, t in enumerate(tables) if t['id'] == left_id)
+        right_idx = next(i for i, t in enumerate(tables) if t['id'] == right_id)
+        
+        tables[left_idx], tables[right_idx] = tables[right_idx], tables[left_idx]
+        
+        for j in swapped['joins']:
+            if j['id'] == full_join['id']:
+                j['type'] = 'LEFT'
+                j['leftTableId'], j['rightTableId'] = right_id, left_id
+                j['leftColumn'], j['rightColumn'] = full_join['rightColumn'], full_join['leftColumn']
+                j['leftTable'], j['rightTable'] = full_join['rightTable'], full_join['leftTable']
+            else:
+                pass
+        
+        return swapped
     
     def _generate_select(self):
         selected_fields = self.query_structure.get('selectedFields', [])
@@ -95,40 +167,117 @@ class SQLGenerator:
         
         return f'SELECT {", ".join(select_items)}'
     
-    def _generate_from(self):
+    def _generate_from_and_joins(self):
         tables = self.query_structure.get('tables', [])
+        joins = self.query_structure.get('joins', [])
+        
         if not tables:
             raise ValueError('No tables selected')
         
-        first_table = tables[0]
+        if not joins:
+            first_table = tables[0]
+            table_name = SecurityService.validate_table_name(first_table['tableName'])
+            alias = SecurityService.validate_identifier(first_table['alias'])
+            return f'FROM {SecurityService.quote_identifier(table_name)} {SecurityService.quote_identifier(alias)}'
+        
+        return self._generate_from_with_joins(tables, joins)
+    
+    def _generate_from_with_joins(self, tables, joins):
+        join_graph = self._build_join_graph(tables, joins)
+        ordered_tables, ordered_joins = self._order_tables_with_joins(tables, joins, join_graph)
+        
+        first_table = ordered_tables[0]
         table_name = SecurityService.validate_table_name(first_table['tableName'])
         alias = SecurityService.validate_identifier(first_table['alias'])
-        
-        return f'FROM {SecurityService.quote_identifier(table_name)} {SecurityService.quote_identifier(alias)}'
-    
-    def _generate_joins(self):
-        joins = self.query_structure.get('joins', [])
-        if not joins:
-            return None
+        from_clause = f'FROM {SecurityService.quote_identifier(table_name)} {SecurityService.quote_identifier(alias)}'
         
         join_parts = []
-        for join in joins:
-            join_type = SecurityService.validate_join_type(join['type'])
-            right_table_name = SecurityService.validate_table_name(join['rightTable'])
-            right_alias = self._get_table_alias(join.get('rightTableId', ''))
-            left_col = self._get_qualified_column(join.get('leftTableId', ''), join['leftColumn'])
-            right_col = self._get_qualified_column(join.get('rightTableId', ''), join['rightColumn'])
-            
-            quoted_right_table = SecurityService.quote_identifier(right_table_name)
-            quoted_right_alias = SecurityService.quote_identifier(right_alias)
-            if join_type == 'RIGHT' or join_type == 'FULL':
-                join_sql = f'LEFT JOIN {quoted_right_table} {quoted_right_alias} ON {left_col} = {right_col}'
-            else:
-                join_sql = f'{join_type} JOIN {quoted_right_table} {quoted_right_alias} ON {left_col} = {right_col}'
-            
+        for join in ordered_joins:
+            join_sql = self._generate_single_join(join)
             join_parts.append(join_sql)
         
-        return '\n'.join(join_parts)
+        if join_parts:
+            return from_clause + '\n' + '\n'.join(join_parts)
+        return from_clause
+    
+    def _build_join_graph(self, tables, joins):
+        graph = {t['id']: [] for t in tables}
+        for join in joins:
+            left_id = join['leftTableId']
+            right_id = join['rightTableId']
+            graph[left_id].append({'to': right_id, 'join': join})
+            graph[right_id].append({'to': left_id, 'join': join, 'reverse': True})
+        return graph
+    
+    def _order_tables_with_joins(self, tables, joins, join_graph):
+        right_joins = [j for j in joins if j.get('type') == 'RIGHT']
+        
+        if not right_joins:
+            return tables, joins
+        
+        table_ids_in_order = []
+        joins_in_order = []
+        visited = set()
+        
+        start_table_id = right_joins[0]['rightTableId']
+        
+        def dfs(table_id):
+            if table_id in visited:
+                return
+            visited.add(table_id)
+            table_ids_in_order.append(table_id)
+            
+            for edge in join_graph.get(table_id, []):
+                neighbor_id = edge['to']
+                if neighbor_id not in visited:
+                    join = edge['join']
+                    is_reverse = edge.get('reverse', False)
+                    
+                    if is_reverse or join.get('type') == 'RIGHT':
+                        normalized_join = self._normalize_join(join, reverse=True)
+                    else:
+                        normalized_join = join
+                    
+                    joins_in_order.append(normalized_join)
+                    dfs(neighbor_id)
+        
+        dfs(start_table_id)
+        
+        for table in tables:
+            if table['id'] not in visited:
+                dfs(table['id'])
+        
+        ordered_tables = [next(t for t in tables if t['id'] == tid) for tid in table_ids_in_order]
+        
+        return ordered_tables, joins_in_order
+    
+    def _normalize_join(self, join, reverse):
+        normalized = deepcopy(join)
+        
+        if reverse:
+            normalized['leftTableId'] = join['rightTableId']
+            normalized['leftColumn'] = join['rightColumn']
+            normalized['leftTable'] = join['rightTable']
+            normalized['rightTableId'] = join['leftTableId']
+            normalized['rightColumn'] = join['leftColumn']
+            normalized['rightTable'] = join['leftTable']
+        
+        if normalized['type'] == 'RIGHT':
+            normalized['type'] = 'LEFT'
+        
+        return normalized
+    
+    def _generate_single_join(self, join):
+        join_type = SecurityService.validate_join_type(join['type'])
+        right_table_name = SecurityService.validate_table_name(join['rightTable'])
+        right_alias = self._get_table_alias(join.get('rightTableId', ''))
+        left_col = self._get_qualified_column(join.get('leftTableId', ''), join['leftColumn'])
+        right_col = self._get_qualified_column(join.get('rightTableId', ''), join['rightColumn'])
+        
+        quoted_right_table = SecurityService.quote_identifier(right_table_name)
+        quoted_right_alias = SecurityService.quote_identifier(right_alias)
+        
+        return f'{join_type} JOIN {quoted_right_table} {quoted_right_alias} ON {left_col} = {right_col}'
     
     def _generate_where(self):
         where = self.query_structure.get('where')
