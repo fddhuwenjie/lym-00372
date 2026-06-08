@@ -7,7 +7,8 @@ import type {
 } from '@/types';
 import { isWhereCondition, isWhereClause } from '@/types';
 
-const OPERATORS: ComparisonOperator[] = ['=', '!=', '>', '<', '>=', '<=', 'LIKE', 'IN'];
+const OPERATORS: ComparisonOperator[] = ['=', '!=', '>', '<', '>=', '<=', 'LIKE', 'IN', 'NOT IN', 'EXISTS', 'NOT EXISTS'];
+const SUBQUERY_OPERATORS: ComparisonOperator[] = ['IN', 'NOT IN', 'EXISTS', 'NOT EXISTS'];
 
 function generateId(): string {
   return Math.random().toString(36).substring(2, 11);
@@ -124,96 +125,150 @@ function WhereNodeEditor({ node, path, tables, onUpdate, onRemove }: WhereNodeEd
     const selectedColumn = columns.find(
       (c) => c.tableId === node.tableId && c.columnName === node.columnName
     );
+    const isSubqueryOp = SUBQUERY_OPERATORS.includes(node.cmp);
+    const hasSubquery = node.subquery !== undefined;
 
     return (
-      <div className="flex items-center gap-2 py-1">
-        <select
-          value={node.tableId}
-          onChange={(e) => {
-            const tableId = e.target.value;
-            const table = tables.find((t) => t.id === tableId);
-            const meta = metadata.find((m) => m.name === table?.tableName);
-            const firstCol = meta?.columns[0]?.name || '';
-            onUpdate(path, { ...node, tableId, columnName: firstCol });
-          }}
-          className="bg-dark-700 border border-dark-600 rounded px-2 py-1 text-sm text-dark-200 focus:outline-none focus:border-primary-500 max-w-[120px] truncate"
-        >
-          {tables.map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.alias}
-            </option>
-          ))}
-        </select>
-        <select
-          value={node.columnName}
-          onChange={(e) => onUpdate(path, { ...node, columnName: e.target.value })}
-          className="bg-dark-700 border border-dark-600 rounded px-2 py-1 text-sm text-dark-200 focus:outline-none focus:border-primary-500 max-w-[140px] truncate"
-        >
-          {columns
-            .filter((c) => c.tableId === node.tableId)
-            .map((c) => (
-              <option key={c.columnName} value={c.columnName}>
-                {c.columnName}
+      <div className="py-1">
+        <div className="flex items-center gap-2">
+          <select
+            value={node.tableId}
+            onChange={(e) => {
+              const tableId = e.target.value;
+              const table = tables.find((t) => t.id === tableId);
+              const meta = metadata.find((m) => m.name === table?.tableName);
+              const firstCol = meta?.columns[0]?.name || '';
+              onUpdate(path, { ...node, tableId, columnName: firstCol });
+            }}
+            className="bg-dark-700 border border-dark-600 rounded px-2 py-1 text-sm text-dark-200 focus:outline-none focus:border-primary-500 max-w-[120px] truncate"
+          >
+            {tables.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.alias}
               </option>
             ))}
-        </select>
-        <select
-          value={node.cmp}
-          onChange={(e) =>
-            onUpdate(path, { ...node, cmp: e.target.value as ComparisonOperator })
-          }
-          className="bg-dark-700 border border-dark-600 rounded px-2 py-1 text-sm text-dark-200 focus:outline-none focus:border-primary-500"
-        >
-          {OPERATORS.map((op) => (
-            <option key={op} value={op}>
-              {op}
-            </option>
-          ))}
-        </select>
-        {node.cmp === 'IN' ? (
-          <input
-            type="text"
-            value={Array.isArray(node.value) ? node.value.join(', ') : ''}
-            placeholder="value1, value2, ..."
+          </select>
+          <select
+            value={node.columnName}
+            onChange={(e) => onUpdate(path, { ...node, columnName: e.target.value })}
+            className="bg-dark-700 border border-dark-600 rounded px-2 py-1 text-sm text-dark-200 focus:outline-none focus:border-primary-500 max-w-[140px] truncate"
+          >
+            {columns
+              .filter((c) => c.tableId === node.tableId)
+              .map((c) => (
+                <option key={c.columnName} value={c.columnName}>
+                  {c.columnName}
+                </option>
+              ))}
+          </select>
+          <select
+            value={node.cmp}
             onChange={(e) => {
-              const values = e.target.value
-                .split(',')
-                .map((v) => v.trim())
-                .filter((v) => v);
-              onUpdate(path, { ...node, value: values });
-            }}
-            className="flex-1 bg-dark-700 border border-dark-600 rounded px-2 py-1 text-sm text-dark-200 focus:outline-none focus:border-primary-500 min-w-[120px]"
-          />
-        ) : (
-          <input
-            type="text"
-            value={String(node.value)}
-            placeholder="value"
-            onChange={(e) => {
-              let value: string | number = e.target.value;
-              if (selectedColumn && selectedColumn.columnType.toLowerCase().includes('int')) {
-                const num = parseInt(e.target.value, 10);
-                if (!isNaN(num)) {
-                  value = num;
-                }
-              } else if (selectedColumn && (selectedColumn.columnType.toLowerCase().includes('decimal') || selectedColumn.columnType.toLowerCase().includes('numeric'))) {
-                const num = parseFloat(e.target.value);
-                if (!isNaN(num)) {
-                  value = num;
-                }
+              const newCmp = e.target.value as ComparisonOperator;
+              const newNode = { ...node, cmp: newCmp };
+              if (!SUBQUERY_OPERATORS.includes(newCmp)) {
+                delete newNode.subquery;
               }
-              onUpdate(path, { ...node, value });
+              onUpdate(path, newNode);
             }}
-            className="flex-1 bg-dark-700 border border-dark-600 rounded px-2 py-1 text-sm text-dark-200 focus:outline-none focus:border-primary-500 min-w-[120px]"
-          />
+            className="bg-dark-700 border border-dark-600 rounded px-2 py-1 text-sm text-dark-200 focus:outline-none focus:border-primary-500"
+          >
+            {OPERATORS.map((op) => (
+              <option key={op} value={op}>
+                {op}
+              </option>
+            ))}
+          </select>
+          {isSubqueryOp && (
+            <button
+              onClick={() => {
+                const newNode = { ...node };
+                if (hasSubquery) {
+                  delete newNode.subquery;
+                  newNode.value = '';
+                } else {
+                  newNode.subquery = {
+                    tables: [],
+                    selectedFields: [],
+                    joins: [],
+                    where: null,
+                    aggregations: [],
+                    limit: 100,
+                  };
+                  delete newNode.value;
+                }
+                onUpdate(path, newNode);
+              }}
+              className={`px-2 py-1 text-xs rounded transition-colors ${
+                hasSubquery
+                  ? 'bg-emerald-600 text-white'
+                  : 'bg-dark-700 text-dark-300 hover:bg-dark-600'
+              }`}
+            >
+              {hasSubquery ? 'Edit Subquery' : 'Use Subquery'}
+            </button>
+          )}
+          {!isSubqueryOp ? (
+            <input
+              type="text"
+              value={String(node.value)}
+              placeholder="value"
+              onChange={(e) => {
+                let value: string | number = e.target.value;
+                if (selectedColumn && selectedColumn.columnType.toLowerCase().includes('int')) {
+                  const num = parseInt(e.target.value, 10);
+                  if (!isNaN(num)) {
+                    value = num;
+                  }
+                } else if (selectedColumn && (selectedColumn.columnType.toLowerCase().includes('decimal') || selectedColumn.columnType.toLowerCase().includes('numeric'))) {
+                  const num = parseFloat(e.target.value);
+                  if (!isNaN(num)) {
+                    value = num;
+                  }
+                }
+                onUpdate(path, { ...node, value });
+              }}
+              className="flex-1 bg-dark-700 border border-dark-600 rounded px-2 py-1 text-sm text-dark-200 focus:outline-none focus:border-primary-500 min-w-[120px]"
+            />
+          ) : hasSubquery ? (
+            <span className="flex-1 text-xs text-emerald-400 font-mono bg-dark-900 px-2 py-1 rounded truncate">
+              (SELECT ...) [Subquery]
+            </span>
+          ) : node.cmp === 'IN' || node.cmp === 'NOT IN' ? (
+            <input
+              type="text"
+              value={Array.isArray(node.value) ? node.value.join(', ') : ''}
+              placeholder="value1, value2, ..."
+              onChange={(e) => {
+                const values = e.target.value
+                  .split(',')
+                  .map((v) => v.trim())
+                  .filter((v) => v);
+                onUpdate(path, { ...node, value: values });
+              }}
+              className="flex-1 bg-dark-700 border border-dark-600 rounded px-2 py-1 text-sm text-dark-200 focus:outline-none focus:border-primary-500 min-w-[120px]"
+            />
+          ) : (
+            <span className="flex-1 text-xs text-dark-500">
+              Click "Use Subquery" to define
+            </span>
+          )}
+          <button
+            onClick={() => onRemove(path)}
+            className="p-1 text-dark-500 hover:text-red-400 transition-colors"
+            title="Remove condition"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
+        </div>
+        {hasSubquery && (
+          <div className="ml-6 mt-2 p-3 bg-dark-900 rounded border border-dark-600">
+            <div className="text-xs text-dark-400 mb-2">Subquery - Drag tables to canvas to define</div>
+            <div className="text-xs text-dark-500">
+              Subquery structure stored in query. Click "Load to Canvas" to edit.
+            </div>
+          </div>
         )}
-        <button
-          onClick={() => onRemove(path)}
-          className="p-1 text-dark-500 hover:text-red-400 transition-colors"
-          title="Remove condition"
-        >
-          <Trash2 className="w-3.5 h-3.5" />
-        </button>
       </div>
     );
   }

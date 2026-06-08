@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Code, Copy, Check, Play, Trash2, ChevronDown, RefreshCw } from 'lucide-react';
+import { Code, Copy, Check, Play, Trash2, ChevronDown, RefreshCw, Plus } from 'lucide-react';
 import { useQueryStore } from '@/store/queryStore';
 import { debounce } from '@/lib/utils';
+import { v4 as uuidv4 } from 'uuid';
 
 export default function SQLPanel() {
   const [expanded, setExpanded] = useState(true);
@@ -14,6 +15,9 @@ export default function SQLPanel() {
   const executeQuery = useQueryStore((state) => state.executeQuery);
   const clearAll = useQueryStore((state) => state.clearAll);
   const tables = useQueryStore((state) => state.tables);
+  const addCTE = useQueryStore((state) => state.addCTE);
+  const ctes = useQueryStore((state) => state.ctes);
+  const getQueryStructure = useQueryStore((state) => state.getQueryStructure);
 
   const debouncedGenerate = useCallback(
     debounce(() => {
@@ -34,6 +38,15 @@ export default function SQLPanel() {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }
+  };
+
+  const handleAddCTE = () => {
+    const newCTE = {
+      id: uuidv4(),
+      name: `cte_${ctes.length + 1}`,
+      queryStructure: getQueryStructure(),
+    };
+    addCTE(newCTE);
   };
 
   const formatSQL = (sql: string) => {
@@ -62,6 +75,14 @@ export default function SQLPanel() {
           </button>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            onClick={handleAddCTE}
+            className="flex items-center gap-1 px-2 py-1 text-xs bg-dark-700 hover:bg-dark-600 text-dark-300 rounded transition-colors"
+            title="Add CTE from current canvas"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            Add CTE
+          </button>
           <button
             onClick={() => generateSQL()}
             className="p-1.5 text-dark-400 hover:text-primary-400 transition-colors rounded hover:bg-dark-700"

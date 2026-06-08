@@ -44,7 +44,7 @@ export interface SelectedField {
   alias?: string;
 }
 
-export type ComparisonOperator = '=' | '!=' | '>' | '<' | '>=' | '<=' | 'LIKE' | 'IN';
+export type ComparisonOperator = '=' | '!=' | '>' | '<' | '>=' | '<=' | 'LIKE' | 'IN' | 'NOT IN' | 'EXISTS' | 'NOT EXISTS';
 
 export interface WhereClause {
   tableId: string;
@@ -52,6 +52,7 @@ export interface WhereClause {
   cmp: ComparisonOperator;
   value: string | number | boolean | (string | number)[];
   id: string;
+  subquery?: QueryStructure;
 }
 
 export interface WhereCondition {
@@ -69,6 +70,12 @@ export interface Aggregation {
   alias?: string;
 }
 
+export interface CTE {
+  id: string;
+  name: string;
+  queryStructure: QueryStructure;
+}
+
 export interface QueryStructure {
   tables: TableNode[];
   joins: Join[];
@@ -76,6 +83,7 @@ export interface QueryStructure {
   where: WhereCondition | null;
   aggregations: Aggregation[];
   limit: number;
+  ctes?: CTE[];
 }
 
 export interface GeneratedSQL {
@@ -94,6 +102,7 @@ export interface QueryResult {
   executionTime: number;
   rowCount: number;
   sql?: string;
+  params?: Record<string, any>;
 }
 
 export type WhereNode = WhereCondition | WhereClause;
@@ -105,3 +114,74 @@ export function isWhereCondition(node: WhereNode): node is WhereCondition {
 export function isWhereClause(node: WhereNode): node is WhereClause {
   return 'columnName' in node && 'cmp' in node;
 }
+
+export type ChartType = 'line' | 'bar' | 'pie' | 'scatter';
+
+export interface ChartConfig {
+  type: ChartType;
+  xField: string;
+  yField: string;
+  seriesField?: string;
+  title?: string;
+}
+
+export interface SavedQuery {
+  id: number;
+  name: string;
+  description: string;
+  query_structure: QueryStructure;
+  chart_config?: ChartConfig;
+  share_token?: string;
+  share_expires_at?: string;
+  share_access_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface QueryHistoryItem {
+  id: number;
+  user_session: string;
+  query_structure: QueryStructure;
+  sql: string;
+  params: Record<string, any>;
+  duration: number;
+  row_count: number;
+  created_at: string;
+}
+
+export interface ExplainPlanNode {
+  id: string;
+  parentId: string | null;
+  detail: string;
+  tableName: string | null;
+  indexName: string | null;
+  estimatedRows: number | null;
+  isFullScan: boolean;
+  children: ExplainPlanNode[];
+}
+
+export interface ExplainPlanEdge {
+  id: string;
+  source: string;
+  target: string;
+}
+
+export interface ExplainResult {
+  queryPlan: {
+    nodes: ExplainPlanNode[];
+    edges: ExplainPlanEdge[];
+    roots: ExplainPlanNode[];
+  };
+  bytecode: any[];
+  sql: string;
+  rawPlanRows: any[];
+  rawBytecodeRows: any[];
+}
+
+export interface ShareResult {
+  query: SavedQuery;
+  result: QueryResult;
+}
+
+export type TabType = 'result' | 'saved' | 'history' | 'plan' | 'share';
+export type ResultViewMode = 'table' | 'chart';

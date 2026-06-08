@@ -2,17 +2,20 @@ import { useEffect, useState } from 'react';
 import TableList from '@/components/TableList';
 import QueryCanvas from '@/components/QueryCanvas';
 import SQLPanel from '@/components/SQLPanel';
-import ResultPanel from '@/components/ResultPanel';
 import WhereEditor from '@/components/WhereEditor';
 import JoinEditor from '@/components/JoinEditor';
+import CTEPane from '@/components/CTEPane';
+import TabsPanel from '@/components/TabsPanel';
+import Toolbar from '@/components/Toolbar';
 import { useQueryStore } from '@/store/queryStore';
 import { getMetadata } from '@/services/api';
 import { Database, Loader2, AlertCircle } from 'lucide-react';
 
 export default function Home() {
   const setMetadata = useQueryStore((state) => state.setMetadata);
+  const error = useQueryStore((state) => state.error);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [, setDraggingTable] = useState<string | null>(null);
 
   useEffect(() => {
@@ -22,7 +25,7 @@ export default function Home() {
         setMetadata(data);
         setLoading(false);
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to load metadata');
+        setLoadError(err instanceof Error ? err.message : 'Failed to load metadata');
         setLoading(false);
       }
     };
@@ -54,13 +57,13 @@ export default function Home() {
     );
   }
 
-  if (error) {
+  if (loadError) {
     return (
       <div className="h-screen flex items-center justify-center bg-dark-900">
         <div className="flex flex-col items-center gap-3 text-dark-300 max-w-md text-center">
           <AlertCircle className="w-10 h-10 text-red-400" />
           <h2 className="text-lg font-semibold text-dark-100">Failed to Load</h2>
-          <p className="text-sm">{error}</p>
+          <p className="text-sm">{loadError}</p>
           <p className="text-xs text-dark-500 mt-2">
             Make sure the backend server is running on port 5000
           </p>
@@ -71,7 +74,7 @@ export default function Home() {
 
   return (
     <div className="h-screen flex flex-col bg-dark-900">
-      <header className="flex-shrink-0 bg-dark-800 border-b border-dark-700 px-6 py-4">
+      <header className="flex-shrink-0 bg-dark-800 border-b border-dark-700 px-6 py-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <Database className="w-7 h-7 text-primary-400" />
@@ -81,6 +84,11 @@ export default function Home() {
             </div>
           </div>
           <div className="flex items-center gap-4">
+            {error && (
+              <div className="text-xs bg-red-900/30 text-red-300 px-3 py-1 rounded max-w-md truncate">
+                {error}
+              </div>
+            )}
             <div className="text-right">
               <div className="text-xs text-dark-500">Database</div>
               <div className="text-sm font-medium text-primary-400">sakila.db</div>
@@ -88,6 +96,8 @@ export default function Home() {
           </div>
         </div>
       </header>
+
+      <Toolbar />
 
       <div className="flex-1 flex overflow-hidden">
         <aside className="w-72 flex-shrink-0 bg-dark-800 border-r border-dark-700 overflow-hidden flex flex-col">
@@ -104,8 +114,9 @@ export default function Home() {
           <div className="flex-1 overflow-y-auto flex flex-col min-h-0">
             <JoinEditor />
             <WhereEditor />
+            <CTEPane />
             <SQLPanel />
-            <ResultPanel />
+            <TabsPanel />
           </div>
         </aside>
       </div>

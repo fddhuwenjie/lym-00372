@@ -1,4 +1,5 @@
 from app.services.security_service import SecurityService
+from app.services.utils import sort_ctes_by_dependency, validate_cte_names, detect_circular_dependency
 from copy import deepcopy
 
 class SQLGenerator:
@@ -7,6 +8,12 @@ class SQLGenerator:
         self.params = {}
         self.param_counter = 0
         self._tables_by_id = {t['id']: t for t in self.query_structure.get('tables', [])}
+        self.ctes = self.query_structure.get('ctes', [])
+        if self.ctes:
+            validate_cte_names(self.ctes)
+            if detect_circular_dependency(self.ctes):
+                raise ValueError('Circular dependency detected in CTEs')
+            self.ctes = sort_ctes_by_dependency(self.ctes)
     
     def _next_param(self, value):
         self.param_counter += 1
@@ -43,6 +50,10 @@ class SQLGenerator:
     
     def _generate_normal(self):
         sql_parts = []
+        
+        cte_clause = self._generate_ctes()
+        if cte_clause:
+            sql_parts.append(cte_clause)
         
         select_clause = self._generate_select()
         sql_parts.append(select_clause)
@@ -289,6 +300,29 @@ class SQLGenerator:
             return f'WHERE {condition_sql}'
         return None
     
+    def _generate_ctes(self):
+        if not self.ctes:
+            return None
+        
+        cte_parts = []
+        for cte in self.ctes:
+            cte_name = SecurityService.validate_identifier(cte['name'])
+            cte_query = cte['queryStructure']
+            
+            sub_gen = SQLGenerator(cte_query)
+            sub_sql = sub_gen._generate_normal()
+            sub_params = sub_gen.get_params()
+            
+            param_offset = len(self.params)
+            for key, value in sub_params.items():
+                new_key = f'p{int(key[1:]) + param_offset}'
+                sub_sql = sub_sql.replace(f':{key}', f':{new_key}')
+                self.params[new_key] = value
+            
+            cte_parts.append(f'{SecurityService.quote_identifier(cte_name)} AS (\n{sub_sql}\n)')
+        
+        return 'WITH ' + ',\n'.join(cte_parts)
+    
     def _generate_condition_tree(self, node):
         if 'op' in node and 'children' in node:
             op = node['op']
@@ -307,27 +341,62 @@ class SQLGenerator:
                 return children_sql[0]
             return f'({f" {op} ".join(children_sql)})'
         
-        elif 'columnName' in node and 'cmp' in node:
-            table_id = node['tableId']
-            column_name = node['columnName']
+        elif 'cmp' in node:
             cmp = SecurityService.validate_operator(node['cmp'])
-            value = SecurityService.validate_value(node['value'])
             
-            col = self._get_qualified_column(table_id, column_name)
+            if cmp in ('IN', 'NOT IN', 'EXISTS', 'NOT EXISTS') and 'subquery' in node:
+                return self._generate_subquery_condition(node, cmp)
             
-            if cmp == 'IN':
-                if not isinstance(value, list):
-                    raise ValueError('IN operator requires a list value')
-                placeholders = [self._next_param(v) for v in value]
-                return f'{col} IN ({", ".join(placeholders)})'
-            elif cmp == 'LIKE':
-                param = self._next_param(value)
-                return f'{col} LIKE {param}'
-            else:
-                param = self._next_param(value)
-                return f'{col} {cmp} {param}'
+            if 'columnName' in node:
+                table_id = node['tableId']
+                column_name = node['columnName']
+                value = SecurityService.validate_value(node['value'])
+                
+                col = self._get_qualified_column(table_id, column_name)
+                
+                if cmp == 'IN':
+                    if not isinstance(value, list):
+                        raise ValueError('IN operator requires a list value')
+                    placeholders = [self._next_param(v) for v in value]
+                    return f'{col} IN ({", ".join(placeholders)})'
+                elif cmp == 'NOT IN':
+                    if not isinstance(value, list):
+                        raise ValueError('NOT IN operator requires a list value')
+                    placeholders = [self._next_param(v) for v in value]
+                    return f'{col} NOT IN ({", ".join(placeholders)})'
+                elif cmp == 'LIKE':
+                    param = self._next_param(value)
+                    return f'{col} LIKE {param}'
+                else:
+                    param = self._next_param(value)
+                    return f'{col} {cmp} {param}'
         
         return None
+    
+    def _generate_subquery_condition(self, node, cmp):
+        subquery_structure = node.get('subquery')
+        if not subquery_structure:
+            raise ValueError('Subquery structure required for subquery condition')
+        
+        sub_gen = SQLGenerator(subquery_structure)
+        sub_sql = sub_gen._generate_normal()
+        sub_params = sub_gen.get_params()
+        
+        param_offset = len(self.params)
+        for key, value in sub_params.items():
+            new_key = f'p{int(key[1:]) + param_offset}'
+            sub_sql = sub_sql.replace(f':{key}', f':{new_key}')
+            self.params[new_key] = value
+        
+        if cmp in ('EXISTS', 'NOT EXISTS'):
+            return f'{cmp} (\n{sub_sql}\n)'
+        else:
+            if 'columnName' not in node:
+                raise ValueError('Column name required for IN/NOT IN subquery')
+            table_id = node['tableId']
+            column_name = node['columnName']
+            col = self._get_qualified_column(table_id, column_name)
+            return f'{col} {cmp} (\n{sub_sql}\n)'
     
     def _generate_group_by(self):
         aggregations = self.query_structure.get('aggregations', [])

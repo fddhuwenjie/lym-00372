@@ -1,5 +1,6 @@
 from app.database import db
-from datetime import date
+from datetime import date, datetime, timedelta
+import json
 
 class Category(db.Model):
     __tablename__ = 'category'
@@ -70,3 +71,68 @@ class OrderItem(db.Model):
     product_id = db.Column(db.Integer, db.ForeignKey('product.id'), nullable=False)
     quantity = db.Column(db.Integer, nullable=False)
     unit_price = db.Column(db.Numeric(10, 2), nullable=False)
+
+class SavedQuery(db.Model):
+    __tablename__ = 'saved_queries'
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    name = db.Column(db.String(200), nullable=False)
+    description = db.Column(db.Text)
+    query_structure = db.Column(db.JSON, nullable=False)
+    chart_config = db.Column(db.JSON)
+    share_token = db.Column(db.String(10), unique=True, index=True)
+    share_expires_at = db.Column(db.DateTime)
+    share_access_count = db.Column(db.Integer, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'name': self.name,
+            'description': self.description,
+            'query_structure': self.query_structure,
+            'chart_config': self.chart_config,
+            'share_token': self.share_token,
+            'share_expires_at': self.share_expires_at.isoformat() if self.share_expires_at else None,
+            'share_access_count': self.share_access_count,
+            'created_at': self.created_at.isoformat(),
+            'updated_at': self.updated_at.isoformat(),
+        }
+
+    def is_share_valid(self):
+        if not self.share_token:
+            return False
+        if self.share_expires_at and datetime.utcnow() > self.share_expires_at:
+            return False
+        return True
+
+class QueryHistory(db.Model):
+    __tablename__ = 'query_history'
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    user_session = db.Column(db.String(100), index=True)
+    query_structure = db.Column(db.JSON, nullable=False)
+    sql = db.Column(db.Text, nullable=False)
+    params = db.Column(db.JSON)
+    duration = db.Column(db.Float)
+    row_count = db.Column(db.Integer)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'user_session': self.user_session,
+            'query_structure': self.query_structure,
+            'sql': self.sql,
+            'params': self.params,
+            'duration': self.duration,
+            'row_count': self.row_count,
+            'created_at': self.created_at.isoformat(),
+        }
+
+    @staticmethod
+    def prune_old_records(session_id, keep=50):
+        records = QueryHistory.query.filter_by(user_session=session_id).order_by(QueryHistory.created_at.desc()).all()
+        if len(records) > keep:
+            for record in records[keep:]:
+                db.session.delete(record)
+            db.session.commit()

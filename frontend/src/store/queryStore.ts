@@ -1,9 +1,14 @@
 import { create } from 'zustand';
 import type { 
   TableMetadata, TableNode, Join, SelectedField, WhereCondition, 
-  Aggregation, QueryStructure, QueryResult, GeneratedSQL, WhereClause 
+  Aggregation, QueryStructure, QueryResult, GeneratedSQL, WhereClause,
+  CTE, TabType, ResultViewMode, ChartConfig, SavedQuery, QueryHistoryItem, ExplainResult
 } from '@/types';
-import { generateSQL, executeQuery } from '@/services/api';
+import { 
+  generateSQL, executeQuery, getSavedQueries, createSavedQuery, 
+  updateSavedQuery, deleteSavedQuery, shareQuery, getQueryHistory,
+  explainQuery
+} from '@/services/api';
 
 interface QueryState {
   metadata: TableMetadata[];
@@ -13,12 +18,23 @@ interface QueryState {
   where: WhereCondition | null;
   aggregations: Aggregation[];
   limit: number;
+  ctes: CTE[];
   generatedSQL: GeneratedSQL | null;
   queryResult: QueryResult | null;
   isExecuting: boolean;
   isGenerating: boolean;
   error: string | null;
   suggestedJoins: Join[];
+  activeTab: TabType;
+  resultViewMode: ResultViewMode;
+  chartConfig: ChartConfig | null;
+  savedQueries: SavedQuery[];
+  queryHistory: QueryHistoryItem[];
+  explainResult: ExplainResult | null;
+  isExplaining: boolean;
+  isLoadingSaved: boolean;
+  isLoadingHistory: boolean;
+  currentSavedId: number | null;
   
   setMetadata: (metadata: TableMetadata[]) => void;
   addTable: (table: TableNode) => void;
@@ -38,6 +54,30 @@ interface QueryState {
   executeQuery: () => Promise<void>;
   clearAll: () => void;
   updateSuggestedJoins: () => void;
+  
+  addCTE: (cte: CTE) => void;
+  removeCTE: (cteId: string) => void;
+  updateCTE: (cteId: string, cte: Partial<CTE>) => void;
+  
+  setActiveTab: (tab: TabType) => void;
+  setResultViewMode: (mode: ResultViewMode) => void;
+  setChartConfig: (config: ChartConfig | null) => void;
+  
+  loadSavedQueries: () => Promise<void>;
+  saveQuery: (name: string, description?: string) => Promise<SavedQuery>;
+  updateCurrentQuery: () => Promise<SavedQuery | null>;
+  deleteQuery: (id: number) => Promise<void>;
+  loadQuery: (query: SavedQuery) => void;
+  shareCurrentQuery: (expiresInHours?: number) => Promise<{ token: string; url: string; expires_at?: string } | null>;
+  
+  loadQueryHistory: () => Promise<void>;
+  replayHistory: (item: QueryHistoryItem) => void;
+  
+  runExplain: () => Promise<void>;
+  
+  loadQueryStructure: (structure: QueryStructure) => void;
+  
+  getQueryStructure: () => QueryStructure;
 }
 
 function generateId(): string {
@@ -133,12 +173,23 @@ export const useQueryStore = create<QueryState>((set, get) => ({
   where: null,
   aggregations: [],
   limit: 100,
+  ctes: [],
   generatedSQL: null,
   queryResult: null,
   isExecuting: false,
   isGenerating: false,
   error: null,
   suggestedJoins: [],
+  activeTab: 'result',
+  resultViewMode: 'table',
+  chartConfig: null,
+  savedQueries: [],
+  queryHistory: [],
+  explainResult: null,
+  isExplaining: false,
+  isLoadingSaved: false,
+  isLoadingHistory: false,
+  currentSavedId: null,
 
   updateSuggestedJoins: () => {
     const state = get();
@@ -290,6 +341,7 @@ export const useQueryStore = create<QueryState>((set, get) => ({
         where: state.where,
         aggregations: state.aggregations,
         limit: state.limit,
+        ctes: state.ctes.length > 0 ? state.ctes : undefined,
       };
       const result = await generateSQL(queryStructure);
       set({ generatedSQL: result, isGenerating: false });
@@ -318,6 +370,7 @@ export const useQueryStore = create<QueryState>((set, get) => ({
         where: state.where,
         aggregations: state.aggregations,
         limit: state.limit,
+        ctes: state.ctes.length > 0 ? state.ctes : undefined,
       };
       const result = await executeQuery(queryStructure);
       set({ queryResult: result, isExecuting: false });
@@ -337,10 +390,222 @@ export const useQueryStore = create<QueryState>((set, get) => ({
       selectedFields: [],
       where: null,
       aggregations: [],
+      ctes: [],
       generatedSQL: null,
       queryResult: null,
       error: null,
       suggestedJoins: [],
+      chartConfig: null,
+      currentSavedId: null,
+      explainResult: null,
     });
+  },
+
+  addCTE: (cte) => {
+    set((state) => ({
+      ctes: [...state.ctes, cte],
+    }));
+  },
+
+  removeCTE: (cteId) => {
+    set((state) => ({
+      ctes: state.ctes.filter((c) => c.id !== cteId),
+    }));
+  },
+
+  updateCTE: (cteId, updates) => {
+    set((state) => ({
+      ctes: state.ctes.map((c) =>
+        c.id === cteId ? { ...c, ...updates } : c
+      ),
+    }));
+  },
+
+  setActiveTab: (tab) => {
+    set({ activeTab: tab });
+  },
+
+  setResultViewMode: (mode) => {
+    set({ resultViewMode: mode });
+  },
+
+  setChartConfig: (config) => {
+    set({ chartConfig: config });
+  },
+
+  loadSavedQueries: async () => {
+    set({ isLoadingSaved: true });
+    try {
+      const queries = await getSavedQueries();
+      set({ savedQueries: queries, isLoadingSaved: false });
+    } catch (err) {
+      set({ 
+        error: err instanceof Error ? err.message : 'Failed to load saved queries',
+        isLoadingSaved: false,
+      });
+    }
+  },
+
+  saveQuery: async (name, description) => {
+    const state = get();
+    const queryStructure: QueryStructure = {
+      tables: state.tables,
+      joins: state.joins,
+      selectedFields: state.selectedFields,
+      where: state.where,
+      aggregations: state.aggregations,
+      limit: state.limit,
+      ctes: state.ctes.length > 0 ? state.ctes : undefined,
+    };
+    const saved = await createSavedQuery({
+      name,
+      description,
+      query_structure: queryStructure,
+      chart_config: state.chartConfig || undefined,
+    });
+    set({ currentSavedId: saved.id });
+    get().loadSavedQueries();
+    return saved;
+  },
+
+  updateCurrentQuery: async () => {
+    const state = get();
+    if (!state.currentSavedId) return null;
+    
+    const queryStructure: QueryStructure = {
+      tables: state.tables,
+      joins: state.joins,
+      selectedFields: state.selectedFields,
+      where: state.where,
+      aggregations: state.aggregations,
+      limit: state.limit,
+      ctes: state.ctes.length > 0 ? state.ctes : undefined,
+    };
+    const updated = await updateSavedQuery(state.currentSavedId, {
+      query_structure: queryStructure,
+      chart_config: state.chartConfig || undefined,
+    });
+    get().loadSavedQueries();
+    return updated;
+  },
+
+  deleteQuery: async (id) => {
+    await deleteSavedQuery(id);
+    if (get().currentSavedId === id) {
+      set({ currentSavedId: null });
+    }
+    get().loadSavedQueries();
+  },
+
+  loadQuery: (query) => {
+    const structure = query.query_structure;
+    set({
+      tables: structure.tables || [],
+      joins: structure.joins || [],
+      selectedFields: structure.selectedFields || [],
+      where: structure.where || null,
+      aggregations: structure.aggregations || [],
+      limit: structure.limit || 100,
+      ctes: structure.ctes || [],
+      chartConfig: query.chart_config || null,
+      currentSavedId: query.id,
+      queryResult: null,
+      generatedSQL: null,
+    });
+    get().updateSuggestedJoins();
+  },
+
+  shareCurrentQuery: async (expiresInHours) => {
+    const state = get();
+    if (!state.currentSavedId) return null;
+    return await shareQuery(state.currentSavedId, expiresInHours);
+  },
+
+  loadQueryHistory: async () => {
+    set({ isLoadingHistory: true });
+    try {
+      const history = await getQueryHistory();
+      set({ queryHistory: history, isLoadingHistory: false });
+    } catch (err) {
+      set({ 
+        error: err instanceof Error ? err.message : 'Failed to load query history',
+        isLoadingHistory: false,
+      });
+    }
+  },
+
+  replayHistory: (item) => {
+    const structure = item.query_structure;
+    set({
+      tables: structure.tables || [],
+      joins: structure.joins || [],
+      selectedFields: structure.selectedFields || [],
+      where: structure.where || null,
+      aggregations: structure.aggregations || [],
+      limit: structure.limit || 100,
+      ctes: structure.ctes || [],
+      currentSavedId: null,
+      queryResult: null,
+      generatedSQL: null,
+      activeTab: 'result',
+    });
+    get().updateSuggestedJoins();
+  },
+
+  runExplain: async () => {
+    const state = get();
+    if (state.tables.length === 0) {
+      set({ error: 'Please add at least one table' });
+      return;
+    }
+
+    set({ isExplaining: true, error: null });
+    try {
+      const queryStructure: QueryStructure = {
+        tables: state.tables,
+        joins: state.joins,
+        selectedFields: state.selectedFields,
+        where: state.where,
+        aggregations: state.aggregations,
+        limit: state.limit,
+        ctes: state.ctes.length > 0 ? state.ctes : undefined,
+      };
+      const result = await explainQuery(queryStructure);
+      set({ explainResult: result, isExplaining: false, activeTab: 'plan' });
+    } catch (err) {
+      set({ 
+        error: err instanceof Error ? err.message : 'Failed to explain query', 
+        isExplaining: false,
+      });
+    }
+  },
+
+  loadQueryStructure: (structure) => {
+    set({
+      tables: structure.tables || [],
+      joins: structure.joins || [],
+      selectedFields: structure.selectedFields || [],
+      where: structure.where || null,
+      aggregations: structure.aggregations || [],
+      limit: structure.limit || 100,
+      ctes: structure.ctes || [],
+      currentSavedId: null,
+      queryResult: null,
+      generatedSQL: null,
+    });
+    get().updateSuggestedJoins();
+  },
+
+  getQueryStructure: () => {
+    const state = get();
+    return {
+      tables: state.tables,
+      joins: state.joins,
+      selectedFields: state.selectedFields,
+      where: state.where,
+      aggregations: state.aggregations,
+      limit: state.limit,
+      ctes: state.ctes.length > 0 ? state.ctes : undefined,
+    };
   },
 }));
